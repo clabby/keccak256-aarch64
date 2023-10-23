@@ -107,6 +107,7 @@ mod tests {
     use super::*;
     use alloy_primitives::{hex, keccak256};
     use proptest::proptest;
+    use std::time::Instant;
 
     /// Differential test reference against the `keccak256` function from `alloy_primitives`, which
     /// uses the `tiny-keccak` crate as a backend.
@@ -117,6 +118,15 @@ mod tests {
         output[32..].copy_from_slice(&*keccak256(&input[32..]));
     }
 
+    /// Differential test reference against the `keccak256` function from `XKCP`, using
+    /// Dani's xkcp-rs bindings.
+    fn reference_xkcp(input: &[u8], output: &mut [u8]) {
+        assert_eq!(input.len(), 64);
+        assert_eq!(output.len(), 64);
+        xkcp_rs::keccak256(&input[..32], output[..32].as_mut().try_into().unwrap());
+        xkcp_rs::keccak256(&input[32..], output[32..].as_mut().try_into().unwrap());
+    }
+
     #[test]
     fn test_keccak256_zeros() {
         let input = [0u8; 64];
@@ -124,6 +134,27 @@ mod tests {
         let mut expected = [0u8; 64];
         simd_keccak256_32b(&input, &mut output);
         reference(&input, &mut expected);
+        assert_eq!(hex::encode(&output), hex::encode(&expected));
+    }
+
+    #[test]
+    fn test_micro_bench() {
+        let input = [0u8; 64];
+        let mut output = [0u8; 64];
+        let mut expected = [0u8; 64];
+
+        let mut now = Instant::now();
+        simd_keccak256_32b(&input, &mut output);
+        println!("simd_keccak256_32b: {:?}", now.elapsed());
+
+        now = Instant::now();
+        reference(&input, &mut expected);
+        println!("reference: {:?}", now.elapsed());
+        assert_eq!(hex::encode(&output), hex::encode(&expected));
+
+        now = Instant::now();
+        reference_xkcp(&input, &mut expected);
+        println!("reference_xkcp: {:?}", now.elapsed());
         assert_eq!(hex::encode(&output), hex::encode(&expected));
     }
 
