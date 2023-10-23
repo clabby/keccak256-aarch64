@@ -1339,7 +1339,7 @@ dependencies = [
 [[package]]
 name = "xkcp-rs"
 version = "0.0.3"
-source = "git+https://github.com/danipopes/xkcp-rs#09744791972f5da088f6be94272a0eba649468b5"
+source = "git+https://github.com/danipopes/xkcp-rs?rev=0974479#09744791972f5da088f6be94272a0eba649468b5"
 dependencies = [
  "xkcp-sys",
 ]
@@ -1347,7 +1347,7 @@ dependencies = [
 [[package]]
 name = "xkcp-sys"
 version = "0.0.3"
-source = "git+https://github.com/danipopes/xkcp-rs#09744791972f5da088f6be94272a0eba649468b5"
+source = "git+https://github.com/danipopes/xkcp-rs?rev=0974479#09744791972f5da088f6be94272a0eba649468b5"
 dependencies = [
  "bindgen",
  "cc",
