@@ -1,4 +1,3 @@
-#![cfg(all(target_arch = "aarch64", target_feature = "sha3"))]
 //! Contains a (restricted) Keccak256 implementation for ARMv8-A.
 
 const RC: [u64; 24] = [
@@ -35,14 +34,14 @@ const RC: [u64; 24] = [
 /// Keccak256 bitrate = `1088`, capacity = `512`
 #[allow(asm_sub_register)]
 #[inline(always)]
-pub fn simd_keccak256<const B: usize>(input: &[u8], output: &mut [u8]) {
+pub fn simd_keccak256_double<const B: usize>(input: &[u8], output: &mut [u8]) {
     assert!(input.len() <= 270 && input.len() == B * 2);
 
     // TODO: Because the inputs are equal length, we can probably avoid padding both sides and just
     // pad once with dup.2d (?)
     let mut input_padded = [0u8; 272];
-    pad_keccak_input::<B>(&mut input_padded, input, 0, 0);
-    pad_keccak_input::<B>(&mut input_padded, input, 136, B);
+    pad_keccak_input::<B, 272>(&mut input_padded, input, 0, 0);
+    pad_keccak_input::<B, 272>(&mut input_padded, input, 136, B);
 
     unsafe {
         core::arch::asm!("
@@ -76,6 +75,59 @@ pub fn simd_keccak256<const B: usize>(input: &[u8], output: &mut [u8]) {
             st4.d {{ v0- v3}}[0], [{output}], #32
             st4.d {{ v0- v3}}[1], [{output}], #32
 
+        ",
+            input = inout(reg) input_padded.as_ptr() => _,
+            output = inout(reg) output.as_mut_ptr() => _,
+            loop = inout(reg) 24 => _,
+            rc = inout(reg) RC.as_ptr() => _,
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
+            out("v5") _, out("v6") _, out("v7") _, out("v8") _, out("v9") _,
+            out("v10") _, out("v11") _, out("v12") _, out("v13") _, out("v14") _,
+            out("v15") _, out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+            out("v20") _, out("v21") _, out("v22") _, out("v23") _, out("v24") _,
+            out("v25") _, out("v26") _, out("v27") _, out("v28") _, out("v29") _,
+            out("v30") _, out("v31") _,
+            options(nostack)
+        );
+    }
+}
+
+/// Single keccak256 on ARMv8-A. Input size restricted to the range of [0, 1080] bits.
+///
+/// Credits to @recmo for the reference K12 implementation in [Goldilocks](https://github.com/recmo/goldilocks/blob/main/pcs/src/k12/aarch64.rs).
+///
+/// Keccak256 bitrate = `1088`, capacity = `512`
+#[allow(asm_sub_register)]
+#[inline(always)]
+pub fn simd_keccak256_single<const B: usize>(input: &[u8], output: &mut [u8]) {
+    assert!(input.len() <= 135 && input.len() == B && output.len() == 32);
+
+    let mut input_padded = [0u8; 136];
+    pad_keccak_input::<B, 136>(&mut input_padded, input, 0, 0);
+
+    unsafe {
+        core::arch::asm!("
+            // Read first block into v0-v16 lower 64-bit.
+            ld4.d {{ v0- v3}}[0], [{input}], #32
+            ld4.d {{ v4- v7}}[0], [{input}], #32
+            ld4.d {{ v8-v11}}[0], [{input}], #32
+            ld4.d {{v12-v15}}[0], [{input}], #32
+            ld1.d {{v16}}[0],     [{input}], #8
+
+            // Zero the capacity bits (`512` capacity bits in keccak256, so the final `8` registers - `8 * 64 = 512`)
+            dup.2d v17, xzr
+            dup.2d v18, xzr
+            dup.2d v19, xzr
+            dup.2d v20, xzr
+            dup.2d v21, xzr
+            dup.2d v22, xzr
+            dup.2d v23, xzr
+            dup.2d v24, xzr
+        ",
+        include_str!("keccak_f1600.asm"),
+        "
+            // Write output (first 256 bits of state)
+            st4.d {{ v0- v3}}[0], [{output}], #32
         ",
             input = inout(reg) input_padded.as_ptr() => _,
             output = inout(reg) output.as_mut_ptr() => _,
@@ -168,8 +220,8 @@ pub fn simd_keccak256_32b(input: &[u8], output: &mut [u8]) {
 }
 
 #[inline(always)]
-fn pad_keccak_input<const B: usize>(
-    padded: &mut [u8; 272],
+fn pad_keccak_input<const B: usize, const P: usize>(
+    padded: &mut [u8; P],
     input: &[u8],
     padded_start: usize,
     input_start: usize,
@@ -212,13 +264,23 @@ mod tests {
     }
 
     #[test]
+    fn test_single_zeros() {
+        const BLOCK_SIZE: usize = 32;
+
+        let input = [0u8; 32];
+        let mut output = [0u8; 32];
+        simd_keccak256_single::<BLOCK_SIZE>(&input, &mut output);
+        assert_eq!(output, *keccak256(input));
+    }
+
+    #[test]
     fn test_keccak256_zeros() {
         const BLOCK_SIZE: usize = 32;
 
         let input = [0u8; 64];
         let mut output = [0u8; 64];
         let mut expected = [0u8; 64];
-        simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+        simd_keccak256_double::<BLOCK_SIZE>(&input, &mut output);
         reference::<BLOCK_SIZE>(&input, &mut expected);
         assert_eq!(hex::encode(&output), hex::encode(&expected));
     }
@@ -230,7 +292,7 @@ mod tests {
         let input = [];
         let mut output = [0u8; 64];
         let mut expected = [0u8; 64];
-        simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+        simd_keccak256_double::<BLOCK_SIZE>(&input, &mut output);
         reference::<BLOCK_SIZE>(&input, &mut expected);
         assert_eq!(hex::encode(&output), hex::encode(&expected));
     }
@@ -242,7 +304,7 @@ mod tests {
         let input = [0u8; 270];
         let mut output = [0u8; 64];
         let mut expected = [0u8; 64];
-        simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+        simd_keccak256_double::<BLOCK_SIZE>(&input, &mut output);
         reference::<BLOCK_SIZE>(&input, &mut expected);
         assert_eq!(hex::encode(&output), hex::encode(&expected));
     }
@@ -279,7 +341,7 @@ mod tests {
         let mut expected = [0u8; 64];
 
         let mut now = Instant::now();
-        simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+        simd_keccak256_double::<BLOCK_SIZE>(&input, &mut output);
         println!("simd_keccak256_32b: {:?}", now.elapsed());
 
         now = Instant::now();
@@ -300,7 +362,7 @@ mod tests {
 
             let mut output = [0u8; 64];
             let mut expected = [0u8; 64];
-            simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+            simd_keccak256_double::<BLOCK_SIZE>(&input, &mut output);
             simd_keccak256_32b(&input, &mut expected);
             assert_eq!(hex::encode(&output), hex::encode(&expected));
         }
@@ -311,7 +373,7 @@ mod tests {
 
             let mut output = [0u8; 64];
             let mut expected = [0u8; 64];
-            simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+            simd_keccak256_double::<BLOCK_SIZE>(&input, &mut output);
             reference::<BLOCK_SIZE>(&input, &mut expected);
             assert_eq!(hex::encode(&output), hex::encode(&expected));
         }
@@ -322,7 +384,7 @@ mod tests {
 
             let mut output = [0u8; 64];
             let mut expected = [0u8; 64];
-            simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+            simd_keccak256_double::<BLOCK_SIZE>(&input, &mut output);
             reference::<BLOCK_SIZE>(&input, &mut expected);
             assert_eq!(hex::encode(&output), hex::encode(&expected));
         }
@@ -333,7 +395,7 @@ mod tests {
 
             let mut output = [0u8; 64];
             let mut expected = [0u8; 64];
-            simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+            simd_keccak256_double::<BLOCK_SIZE>(&input, &mut output);
             reference::<BLOCK_SIZE>(&input, &mut expected);
             assert_eq!(hex::encode(&output), hex::encode(&expected));
         }
