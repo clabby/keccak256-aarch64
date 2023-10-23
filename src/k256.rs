@@ -28,6 +28,71 @@ const RC: [u64; 24] = [
     0x8000000080008008,
 ];
 
+/// Double keccak256 on ARMv8-A. Input size restricted to the range of [0, 1080] bits.
+///
+/// Credits to @recmo for the reference K12 implementation in [Goldilocks](https://github.com/recmo/goldilocks/blob/main/pcs/src/k12/aarch64.rs).
+///
+/// Keccak256 bitrate = `1088`, capacity = `512`
+#[allow(asm_sub_register)]
+#[inline(always)]
+pub fn simd_keccak256<const B: usize>(input: &[u8], output: &mut [u8]) {
+    assert!(input.len() <= 270 && input.len() == B * 2);
+
+    // TODO: Because the inputs are equal length, we can probably avoid padding both sides and just
+    // pad once with dup.2d (?)
+    let mut input_padded = [0u8; 272];
+    pad_keccak_input::<B>(&mut input_padded, input, 0, 0);
+    pad_keccak_input::<B>(&mut input_padded, input, 136, B);
+
+    unsafe {
+        core::arch::asm!("
+            // Read first block into v0-v16 lower 64-bit.
+            ld4.d {{ v0- v3}}[0], [{input}], #32
+            ld4.d {{ v4- v7}}[0], [{input}], #32
+            ld4.d {{ v8-v11}}[0], [{input}], #32
+            ld4.d {{v12-v15}}[0], [{input}], #32
+            ld1.d {{v16}}[0],     [{input}], #8
+
+            // Read second block into v0-v16 upper 64-bit.
+            ld4.d {{ v0- v3}}[1], [{input}], #32
+            ld4.d {{ v4- v7}}[1], [{input}], #32
+            ld4.d {{ v8-v11}}[1], [{input}], #32
+            ld4.d {{v12-v15}}[1], [{input}], #32
+            ld1.d {{v16}}[1],     [{input}], #8
+
+            // Zero the capacity bits (`512` capacity bits in keccak256, so the final `8` registers - `8 * 64 = 512`)
+            dup.2d v17, xzr
+            dup.2d v18, xzr
+            dup.2d v19, xzr
+            dup.2d v20, xzr
+            dup.2d v21, xzr
+            dup.2d v22, xzr
+            dup.2d v23, xzr
+            dup.2d v24, xzr
+        ",
+        include_str!("keccak_f1600.asm"),
+        "
+            // Write output (first 256 bits of state)
+            st4.d {{ v0- v3}}[0], [{output}], #32
+            st4.d {{ v0- v3}}[1], [{output}], #32
+
+        ",
+            input = inout(reg) input_padded.as_ptr() => _,
+            output = inout(reg) output.as_mut_ptr() => _,
+            loop = inout(reg) 24 => _,
+            rc = inout(reg) RC.as_ptr() => _,
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
+            out("v5") _, out("v6") _, out("v7") _, out("v8") _, out("v9") _,
+            out("v10") _, out("v11") _, out("v12") _, out("v13") _, out("v14") _,
+            out("v15") _, out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+            out("v20") _, out("v21") _, out("v22") _, out("v23") _, out("v24") _,
+            out("v25") _, out("v26") _, out("v27") _, out("v28") _, out("v29") _,
+            out("v30") _, out("v31") _,
+            options(nostack)
+        );
+    }
+}
+
 /// Double keccak256 on ARMv8-A. Input size restricted to 64 bytes, 32 bytes on either half of the
 /// slice.
 ///
@@ -102,6 +167,19 @@ pub fn simd_keccak256_32b(input: &[u8], output: &mut [u8]) {
     }
 }
 
+#[inline(always)]
+fn pad_keccak_input<const B: usize>(
+    padded: &mut [u8; 272],
+    input: &[u8],
+    padded_start: usize,
+    input_start: usize,
+) {
+    let padded_end = padded_start + B;
+    padded[padded_start..padded_end].copy_from_slice(&input[input_start..input_start + B]);
+    padded[padded_end] |= 0x01;
+    padded[padded_start + 135] |= 0x80;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,35 +189,69 @@ mod tests {
 
     /// Differential test reference against the `keccak256` function from `alloy_primitives`, which
     /// uses the `tiny-keccak` crate as a backend.
-    fn reference(input: &[u8], output: &mut [u8]) {
-        assert_eq!(input.len(), 64);
+    fn reference<const BLOCK_SIZE: usize>(input: &[u8], output: &mut [u8]) {
+        assert_eq!(input.len(), BLOCK_SIZE * 2);
         assert_eq!(output.len(), 64);
-        output[..32].copy_from_slice(&*keccak256(&input[..32]));
-        output[32..].copy_from_slice(&*keccak256(&input[32..]));
+        output[..32].copy_from_slice(&*keccak256(&input[..BLOCK_SIZE]));
+        output[32..].copy_from_slice(&*keccak256(&input[BLOCK_SIZE..]));
     }
 
     /// Differential test reference against the `keccak256` function from `XKCP`, using
     /// Dani's xkcp-rs bindings.
-    fn reference_xkcp(input: &[u8], output: &mut [u8]) {
-        assert_eq!(input.len(), 64);
+    fn reference_xkcp<const BLOCK_SIZE: usize>(input: &[u8], output: &mut [u8]) {
+        assert_eq!(input.len(), BLOCK_SIZE * 2);
         assert_eq!(output.len(), 64);
-        xkcp_rs::keccak256(&input[..32], output[..32].as_mut().try_into().unwrap());
-        xkcp_rs::keccak256(&input[32..], output[32..].as_mut().try_into().unwrap());
+        xkcp_rs::keccak256(
+            &input[..BLOCK_SIZE],
+            output[..32].as_mut().try_into().unwrap(),
+        );
+        xkcp_rs::keccak256(
+            &input[BLOCK_SIZE..],
+            output[32..].as_mut().try_into().unwrap(),
+        );
     }
 
     #[test]
     fn test_keccak256_zeros() {
+        const BLOCK_SIZE: usize = 32;
+
         let input = [0u8; 64];
         let mut output = [0u8; 64];
         let mut expected = [0u8; 64];
-        simd_keccak256_32b(&input, &mut output);
-        reference(&input, &mut expected);
+        simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+        reference::<BLOCK_SIZE>(&input, &mut expected);
         assert_eq!(hex::encode(&output), hex::encode(&expected));
     }
 
     #[test]
-    fn test_micro_bench() {
-        let input = [0u8; 64];
+    fn test_keccak256_zero_len() {
+        const BLOCK_SIZE: usize = 0;
+
+        let input = [];
+        let mut output = [0u8; 64];
+        let mut expected = [0u8; 64];
+        simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+        reference::<BLOCK_SIZE>(&input, &mut expected);
+        assert_eq!(hex::encode(&output), hex::encode(&expected));
+    }
+
+    #[test]
+    fn test_keccak256_max_len() {
+        const BLOCK_SIZE: usize = 135;
+
+        let input = [0u8; 270];
+        let mut output = [0u8; 64];
+        let mut expected = [0u8; 64];
+        simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+        reference::<BLOCK_SIZE>(&input, &mut expected);
+        assert_eq!(hex::encode(&output), hex::encode(&expected));
+    }
+
+    #[test]
+    fn test_micro_bench_fixed32() {
+        const BLOCK_SIZE: usize = 32;
+
+        let input = [0u8; BLOCK_SIZE * 2];
         let mut output = [0u8; 64];
         let mut expected = [0u8; 64];
 
@@ -148,23 +260,81 @@ mod tests {
         println!("simd_keccak256_32b: {:?}", now.elapsed());
 
         now = Instant::now();
-        reference(&input, &mut expected);
+        reference::<BLOCK_SIZE>(&input, &mut expected);
         println!("reference: {:?}", now.elapsed());
         assert_eq!(hex::encode(&output), hex::encode(&expected));
 
         now = Instant::now();
-        reference_xkcp(&input, &mut expected);
+        reference_xkcp::<BLOCK_SIZE>(&input, &mut expected);
+        println!("reference_xkcp: {:?}", now.elapsed());
+        assert_eq!(hex::encode(&output), hex::encode(&expected));
+    }
+
+    #[test]
+    fn test_micro_bench_varlen() {
+        const BLOCK_SIZE: usize = 128;
+
+        let input = [0u8; BLOCK_SIZE * 2];
+        let mut output = [0u8; 64];
+        let mut expected = [0u8; 64];
+
+        let mut now = Instant::now();
+        simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+        println!("simd_keccak256_32b: {:?}", now.elapsed());
+
+        now = Instant::now();
+        reference::<BLOCK_SIZE>(&input, &mut expected);
+        println!("reference: {:?}", now.elapsed());
+        assert_eq!(hex::encode(&output), hex::encode(&expected));
+
+        now = Instant::now();
+        reference_xkcp::<BLOCK_SIZE>(&input, &mut expected);
         println!("reference_xkcp: {:?}", now.elapsed());
         assert_eq!(hex::encode(&output), hex::encode(&expected));
     }
 
     proptest! {
         #[test]
-        fn fuzz_keccak256(input: [u8; 64]) {
+        fn fuzz_diff_keccak32b(input: [u8; 64]) {
+            const BLOCK_SIZE: usize = 32;
+
             let mut output = [0u8; 64];
             let mut expected = [0u8; 64];
-            simd_keccak256_32b(&input, &mut output);
-            reference(&input, &mut expected);
+            simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+            simd_keccak256_32b(&input, &mut expected);
+            assert_eq!(hex::encode(&output), hex::encode(&expected));
+        }
+
+        #[test]
+        fn fuzz_keccak256_32b(input: [u8; 64]) {
+            const BLOCK_SIZE: usize = 32;
+
+            let mut output = [0u8; 64];
+            let mut expected = [0u8; 64];
+            simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+            reference::<BLOCK_SIZE>(&input, &mut expected);
+            assert_eq!(hex::encode(&output), hex::encode(&expected));
+        }
+
+        #[test]
+        fn fuzz_keccak256_64b(input: [u8; 128]) {
+            const BLOCK_SIZE: usize = 64;
+
+            let mut output = [0u8; 64];
+            let mut expected = [0u8; 64];
+            simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+            reference::<BLOCK_SIZE>(&input, &mut expected);
+            assert_eq!(hex::encode(&output), hex::encode(&expected));
+        }
+
+        #[test]
+        fn fuzz_keccak256_128b(input: [u8; 256]) {
+            const BLOCK_SIZE: usize = 128;
+
+            let mut output = [0u8; 64];
+            let mut expected = [0u8; 64];
+            simd_keccak256::<BLOCK_SIZE>(&input, &mut output);
+            reference::<BLOCK_SIZE>(&input, &mut expected);
             assert_eq!(hex::encode(&output), hex::encode(&expected));
         }
     }
