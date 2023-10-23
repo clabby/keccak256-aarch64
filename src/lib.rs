@@ -3,6 +3,6 @@
 
 mod k256;
 pub use k256::{
-    simd_keccak256_32b_double, simd_keccak256_64b_double, simd_keccak256_double,
-    simd_keccak256_single,
+    simd_keccak256_32b_double, simd_keccak256_32b_single, simd_keccak256_64b_double,
+    simd_keccak256_64b_single, simd_keccak256_double, simd_keccak256_single,
 };

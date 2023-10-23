@@ -1,5 +1,6 @@
 //! Contains a (restricted) Keccak256 implementation for ARMv8-A.
 
+/// Round constants for the Keccak-f[1600] permutation.
 const RC: [u64; 24] = [
     0x0000000000000001,
     0x0000000000008082,
@@ -185,6 +186,62 @@ pub fn simd_keccak256_32b_double(input: &[u8], output: &mut [u8]) {
     );
 }
 
+/// Single keccak256 on ARMv8-A. Input size restricted to 32 bytes.
+///
+/// Credits to @recmo for the reference K12 implementation in [Goldilocks](https://github.com/recmo/goldilocks/blob/main/pcs/src/k12/aarch64.rs).
+///
+/// Keccak256 bitrate = `1088`, capacity = `512`
+#[allow(asm_sub_register)]
+pub fn simd_keccak256_32b_single(input: &[u8], output: &mut [u8]) {
+    assert!(input.len() == 32 && output.len() == 32);
+
+    crate::keccak_256_permutation!(
+        input,
+        output,
+        RC,
+        setup = "
+            // Read first block into v0-v3 lower 64-bit.
+            ld4.d {{ v0- v3}}[0], [{input}], #32
+
+            // Set the starting padding bit in v4
+            movz {input}, #0x01
+            dup.2d v4, {input}
+
+            // Zero padding
+            dup.2d v5, xzr
+            dup.2d v6, xzr
+            dup.2d v7, xzr
+            dup.2d v8, xzr
+            dup.2d v9, xzr
+            dup.2d v10, xzr
+            dup.2d v11, xzr
+            dup.2d v12, xzr
+            dup.2d v13, xzr
+            dup.2d v14, xzr
+            dup.2d v15, xzr
+
+            // Add final padding bit `1088 - 256 = 832 bits`, so `13` registers (`13 * 64 = 832 bits`)
+            // worth of padding is necessary.
+            movz {input}, #0x8000, lsl #48
+            dup.2d v16, {input}
+
+            // Zero the capacity bits (`512` capacity bits in keccak256, so the final `8` registers - `8 * 64 = 512`)
+            dup.2d v17, xzr
+            dup.2d v18, xzr
+            dup.2d v19, xzr
+            dup.2d v20, xzr
+            dup.2d v21, xzr
+            dup.2d v22, xzr
+            dup.2d v23, xzr
+            dup.2d v24, xzr
+        ",
+        teardown = "
+            // Write output (first 256 bits of state)
+            st4.d {{ v0- v3}}[0], [{output}], #32
+        "
+    );
+}
+
 /// Double keccak256 on ARMv8-A. Input size restricted to 128 bytes, 64 bytes on either half of the
 /// slice.
 ///
@@ -209,7 +266,7 @@ pub fn simd_keccak256_64b_double(input: &[u8], output: &mut [u8]) {
             ld4.d {{ v0- v3}}[1], [{input}], #32
             ld4.d {{ v4- v7}}[1], [{input}], #32
 
-            // Set the starting padding bit in v4
+            // Set the starting padding bit in v8
             movz {input}, #0x01
             dup.2d v8, {input}
 
@@ -241,6 +298,59 @@ pub fn simd_keccak256_64b_double(input: &[u8], output: &mut [u8]) {
             // Write output (first 256 bits of state)
             st4.d {{ v0- v3}}[0], [{output}], #32
             st4.d {{ v0- v3}}[1], [{output}], #32
+        "
+    );
+}
+
+/// Single keccak256 on ARMv8-A. Input size restricted to 64 bytes.
+///
+/// Credits to @recmo for the reference K12 implementation in [Goldilocks](https://github.com/recmo/goldilocks/blob/main/pcs/src/k12/aarch64.rs).
+///
+/// Keccak256 bitrate = `1088`, capacity = `512`
+#[allow(asm_sub_register)]
+pub fn simd_keccak256_64b_single(input: &[u8], output: &mut [u8]) {
+    assert!(input.len() == 64 && output.len() == 32);
+
+    crate::keccak_256_permutation!(
+        input,
+        output,
+        RC,
+        setup = "
+            // Read first block into v0-v7 lower 64-bit.
+            ld4.d {{ v0- v3}}[0], [{input}], #32
+            ld4.d {{ v4- v7}}[0], [{input}], #32
+
+            // Set the starting padding bit in v8
+            movz {input}, #0x01
+            dup.2d v8, {input}
+
+            // Zero padding
+            dup.2d v9, xzr
+            dup.2d v10, xzr
+            dup.2d v11, xzr
+            dup.2d v12, xzr
+            dup.2d v13, xzr
+            dup.2d v14, xzr
+            dup.2d v15, xzr
+
+            // Add final padding bit `1088 - 256 = 832 bits`, so `13` registers (`13 * 64 = 832 bits`)
+            // worth of padding is necessary.
+            movz {input}, #0x8000, lsl #48
+            dup.2d v16, {input}
+
+            // Zero the capacity bits (`512` capacity bits in keccak256, so the final `8` registers - `8 * 64 = 512`)
+            dup.2d v17, xzr
+            dup.2d v18, xzr
+            dup.2d v19, xzr
+            dup.2d v20, xzr
+            dup.2d v21, xzr
+            dup.2d v22, xzr
+            dup.2d v23, xzr
+            dup.2d v24, xzr
+        ",
+        teardown = "
+            // Write output (first 256 bits of state)
+            st4.d {{ v0- v3}}[0], [{output}], #32
         "
     );
 }
@@ -419,6 +529,17 @@ mod tests {
         }
 
         #[test]
+        fn fuzz_diff_keccak32b_single(input: [u8; 32]) {
+            const BLOCK_SIZE: usize = 32;
+
+            let mut output = [0u8; 32];
+            let mut expected = [0u8; 32];
+            simd_keccak256_single::<BLOCK_SIZE>(&input, &mut output);
+            simd_keccak256_32b_single(&input, &mut expected);
+            assert_eq!(hex::encode(&output), hex::encode(&expected));
+        }
+
+        #[test]
         fn fuzz_diff_keccak64b(input: [u8; 128]) {
             const BLOCK_SIZE: usize = 64;
 
@@ -426,6 +547,17 @@ mod tests {
             let mut expected = [0u8; 64];
             simd_keccak256_double::<BLOCK_SIZE>(&input, &mut output);
             simd_keccak256_64b_double(&input, &mut expected);
+            assert_eq!(hex::encode(&output), hex::encode(&expected));
+        }
+
+        #[test]
+        fn fuzz_diff_keccak64b_single(input: [u8; 64]) {
+            const BLOCK_SIZE: usize = 64;
+
+            let mut output = [0u8; 32];
+            let mut expected = [0u8; 32];
+            simd_keccak256_single::<BLOCK_SIZE>(&input, &mut output);
+            simd_keccak256_64b_single(&input, &mut expected);
             assert_eq!(hex::encode(&output), hex::encode(&expected));
         }
 
