@@ -35,7 +35,7 @@ const RC: [u64; 24] = [
 #[allow(asm_sub_register)]
 #[inline(always)]
 pub fn simd_keccak256_double<const B: usize>(input: &[u8], output: &mut [u8]) {
-    assert!(input.len() <= 270 && input.len() == B * 2);
+    assert!(input.len() <= 270 && input.len() == B * 2 && output.len() == 64);
 
     // TODO: Because the inputs are equal length, we can probably avoid padding both sides and just
     // pad once with dup.2d (?)
@@ -43,8 +43,11 @@ pub fn simd_keccak256_double<const B: usize>(input: &[u8], output: &mut [u8]) {
     pad_keccak_input::<B, 272>(&mut input_padded, input, 0, 0);
     pad_keccak_input::<B, 272>(&mut input_padded, input, 136, B);
 
-    unsafe {
-        core::arch::asm!("
+    crate::keccak_256_permutation!(
+        input_padded,
+        output,
+        RC,
+        setup = "
             // Read first block into v0-v16 lower 64-bit.
             ld4.d {{ v0- v3}}[0], [{input}], #32
             ld4.d {{ v4- v7}}[0], [{input}], #32
@@ -69,27 +72,13 @@ pub fn simd_keccak256_double<const B: usize>(input: &[u8], output: &mut [u8]) {
             dup.2d v23, xzr
             dup.2d v24, xzr
         ",
-        include_str!("keccak_f1600.asm"),
-        "
+        teardown = "
             // Write output (first 256 bits of state)
             st4.d {{ v0- v3}}[0], [{output}], #32
             st4.d {{ v0- v3}}[1], [{output}], #32
 
-        ",
-            input = inout(reg) input_padded.as_ptr() => _,
-            output = inout(reg) output.as_mut_ptr() => _,
-            loop = inout(reg) 24 => _,
-            rc = inout(reg) RC.as_ptr() => _,
-            out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
-            out("v5") _, out("v6") _, out("v7") _, out("v8") _, out("v9") _,
-            out("v10") _, out("v11") _, out("v12") _, out("v13") _, out("v14") _,
-            out("v15") _, out("v16") _, out("v17") _, out("v18") _, out("v19") _,
-            out("v20") _, out("v21") _, out("v22") _, out("v23") _, out("v24") _,
-            out("v25") _, out("v26") _, out("v27") _, out("v28") _, out("v29") _,
-            out("v30") _, out("v31") _,
-            options(nostack)
-        );
-    }
+        "
+    );
 }
 
 /// Single keccak256 on ARMv8-A. Input size restricted to the range of [0, 1080] bits.
@@ -105,8 +94,11 @@ pub fn simd_keccak256_single<const B: usize>(input: &[u8], output: &mut [u8]) {
     let mut input_padded = [0u8; 136];
     pad_keccak_input::<B, 136>(&mut input_padded, input, 0, 0);
 
-    unsafe {
-        core::arch::asm!("
+    crate::keccak_256_permutation!(
+        input_padded,
+        output,
+        RC,
+        setup = "
             // Read first block into v0-v16 lower 64-bit.
             ld4.d {{ v0- v3}}[0], [{input}], #32
             ld4.d {{ v4- v7}}[0], [{input}], #32
@@ -124,25 +116,11 @@ pub fn simd_keccak256_single<const B: usize>(input: &[u8], output: &mut [u8]) {
             dup.2d v23, xzr
             dup.2d v24, xzr
         ",
-        include_str!("keccak_f1600.asm"),
-        "
+        teardown = "
             // Write output (first 256 bits of state)
             st4.d {{ v0- v3}}[0], [{output}], #32
-        ",
-            input = inout(reg) input_padded.as_ptr() => _,
-            output = inout(reg) output.as_mut_ptr() => _,
-            loop = inout(reg) 24 => _,
-            rc = inout(reg) RC.as_ptr() => _,
-            out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
-            out("v5") _, out("v6") _, out("v7") _, out("v8") _, out("v9") _,
-            out("v10") _, out("v11") _, out("v12") _, out("v13") _, out("v14") _,
-            out("v15") _, out("v16") _, out("v17") _, out("v18") _, out("v19") _,
-            out("v20") _, out("v21") _, out("v22") _, out("v23") _, out("v24") _,
-            out("v25") _, out("v26") _, out("v27") _, out("v28") _, out("v29") _,
-            out("v30") _, out("v31") _,
-            options(nostack)
-        );
-    }
+        "
+    );
 }
 
 /// Double keccak256 on ARMv8-A. Input size restricted to 64 bytes, 32 bytes on either half of the
@@ -152,12 +130,15 @@ pub fn simd_keccak256_single<const B: usize>(input: &[u8], output: &mut [u8]) {
 ///
 /// Keccak256 bitrate = `1088`, capacity = `512`
 #[allow(asm_sub_register)]
-pub fn simd_keccak256_32b(input: &[u8], output: &mut [u8]) {
+pub fn simd_keccak256_32b_double(input: &[u8], output: &mut [u8]) {
     assert_eq!(input.len(), 64);
     assert_eq!(output.len(), 64);
 
-    unsafe {
-        core::arch::asm!("
+    crate::keccak_256_permutation!(
+        input,
+        output,
+        RC,
+        setup = "
             // Read first block into v0-v3 lower 64-bit.
             ld4.d {{ v0- v3}}[0], [{input}], #32
 
@@ -196,27 +177,97 @@ pub fn simd_keccak256_32b(input: &[u8], output: &mut [u8]) {
             dup.2d v23, xzr
             dup.2d v24, xzr
         ",
-        include_str!("keccak_f1600.asm"),
-        "
+        teardown = "
             // Write output (first 256 bits of state)
             st4.d {{ v0- v3}}[0], [{output}], #32
             st4.d {{ v0- v3}}[1], [{output}], #32
+        "
+    );
+}
 
+/// Double keccak256 on ARMv8-A. Input size restricted to 128 bytes, 64 bytes on either half of the
+/// slice.
+///
+/// Credits to @recmo for the reference K12 implementation in [Goldilocks](https://github.com/recmo/goldilocks/blob/main/pcs/src/k12/aarch64.rs).
+///
+/// Keccak256 bitrate = `1088`, capacity = `512`
+#[allow(asm_sub_register)]
+pub fn simd_keccak256_64b_double(input: &[u8], output: &mut [u8]) {
+    assert_eq!(input.len(), 128);
+    assert_eq!(output.len(), 64);
+
+    crate::keccak_256_permutation!(
+        input,
+        output,
+        RC,
+        setup = "
+            // Read first block into v0-v7 lower 64-bit.
+            ld4.d {{ v0- v3}}[0], [{input}], #32
+            ld4.d {{ v4- v7}}[0], [{input}], #32
+
+            // Read second block into v0-v7 upper 64-bit.
+            ld4.d {{ v0- v3}}[1], [{input}], #32
+            ld4.d {{ v4- v7}}[1], [{input}], #32
+
+            // Set the starting padding bit in v4
+            movz {input}, #0x01
+            dup.2d v8, {input}
+
+            // Zero padding
+            dup.2d v9, xzr
+            dup.2d v10, xzr
+            dup.2d v11, xzr
+            dup.2d v12, xzr
+            dup.2d v13, xzr
+            dup.2d v14, xzr
+            dup.2d v15, xzr
+
+            // Add final padding bit `1088 - 256 = 832 bits`, so `13` registers (`13 * 64 = 832 bits`)
+            // worth of padding is necessary.
+            movz {input}, #0x8000, lsl #48
+            dup.2d v16, {input}
+
+            // Zero the capacity bits (`512` capacity bits in keccak256, so the final `8` registers - `8 * 64 = 512`)
+            dup.2d v17, xzr
+            dup.2d v18, xzr
+            dup.2d v19, xzr
+            dup.2d v20, xzr
+            dup.2d v21, xzr
+            dup.2d v22, xzr
+            dup.2d v23, xzr
+            dup.2d v24, xzr
         ",
-            input = inout(reg) input.as_ptr() => _,
-            output = inout(reg) output.as_mut_ptr() => _,
-            loop = inout(reg) 24 => _,
-            rc = inout(reg) RC.as_ptr() => _,
-            out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
-            out("v5") _, out("v6") _, out("v7") _, out("v8") _, out("v9") _,
-            out("v10") _, out("v11") _, out("v12") _, out("v13") _, out("v14") _,
-            out("v15") _, out("v16") _, out("v17") _, out("v18") _, out("v19") _,
-            out("v20") _, out("v21") _, out("v22") _, out("v23") _, out("v24") _,
-            out("v25") _, out("v26") _, out("v27") _, out("v28") _, out("v29") _,
-            out("v30") _, out("v31") _,
-            options(nostack)
-        );
-    }
+        teardown = "
+            // Write output (first 256 bits of state)
+            st4.d {{ v0- v3}}[0], [{output}], #32
+            st4.d {{ v0- v3}}[1], [{output}], #32
+        "
+    );
+}
+
+#[macro_export]
+macro_rules! keccak_256_permutation {
+    ($input:ident, $output:ident, $rc:ident, setup = $setup:literal, teardown = $teardown:literal) => {
+        unsafe {
+            core::arch::asm!(
+                $setup,
+                include_str!("keccak_f1600.asm"),
+                $teardown,
+                input = inout(reg) $input.as_ptr() => _,
+                output = inout(reg) $output.as_mut_ptr() => _,
+                loop = inout(reg) 24 => _,
+                rc = inout(reg) $rc.as_ptr() => _,
+                out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _,
+                out("v5") _, out("v6") _, out("v7") _, out("v8") _, out("v9") _,
+                out("v10") _, out("v11") _, out("v12") _, out("v13") _, out("v14") _,
+                out("v15") _, out("v16") _, out("v17") _, out("v18") _, out("v19") _,
+                out("v20") _, out("v21") _, out("v22") _, out("v23") _, out("v24") _,
+                out("v25") _, out("v26") _, out("v27") _, out("v28") _, out("v29") _,
+                out("v30") _, out("v31") _,
+                options(nostack)
+            );
+        }
+    };
 }
 
 #[inline(always)]
@@ -318,7 +369,7 @@ mod tests {
         let mut expected = [0u8; 64];
 
         let mut now = Instant::now();
-        simd_keccak256_32b(&input, &mut output);
+        simd_keccak256_32b_double(&input, &mut output);
         println!("simd_keccak256_32b: {:?}", now.elapsed());
 
         now = Instant::now();
@@ -363,7 +414,18 @@ mod tests {
             let mut output = [0u8; 64];
             let mut expected = [0u8; 64];
             simd_keccak256_double::<BLOCK_SIZE>(&input, &mut output);
-            simd_keccak256_32b(&input, &mut expected);
+            simd_keccak256_32b_double(&input, &mut expected);
+            assert_eq!(hex::encode(&output), hex::encode(&expected));
+        }
+
+        #[test]
+        fn fuzz_diff_keccak64b(input: [u8; 128]) {
+            const BLOCK_SIZE: usize = 64;
+
+            let mut output = [0u8; 64];
+            let mut expected = [0u8; 64];
+            simd_keccak256_double::<BLOCK_SIZE>(&input, &mut output);
+            simd_keccak256_64b_double(&input, &mut expected);
             assert_eq!(hex::encode(&output), hex::encode(&expected));
         }
 
