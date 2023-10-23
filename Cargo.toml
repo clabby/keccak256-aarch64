@@ -2,7 +2,7 @@
 name = "keccak256-aarch64-simd"
 authors = ["Remco Bloeman", "clabby"]
 description = "SIMD Keccak256 implementation for aarch64 (w/ FEAT_SHA3)"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 
 [dev-dependencies]
